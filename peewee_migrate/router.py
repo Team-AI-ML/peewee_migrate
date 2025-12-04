@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import pkgutil
 import re
 import sys
@@ -101,7 +102,7 @@ class BaseRouter(object):
         migrate = rollback = ""
         if auto:
             # Need to append the CURDIR to the path for import to work.
-            sys.path.append(f"{ CURDIR }")
+            sys.path.append(f"{CURDIR}")
             models = auto if isinstance(auto, list) else [auto]
             if not all(_check_model(m) for m in models):
                 try:
@@ -249,7 +250,9 @@ class BaseRouter(object):
 class Router(BaseRouter):
     """File system router."""
 
-    filemask = re.compile(r"[\d]{3}_[^\.]+\.py$")
+    # Support both old style (001_initial.py) and new timestamp style
+    # (202512041430_add_users.py)
+    filemask = re.compile(r"(?:\d{3}|\d{14})_[^.]+\.py$")
 
     def __init__(
         self,
@@ -271,14 +274,33 @@ class Router(BaseRouter):
         if not self.migrate_dir.exists():
             self.logger.warning("Migration directory: %s does not exist.", self.migrate_dir)
             self.migrate_dir.mkdir(parents=True)
-        return sorted(f.stem for f in Path.iterdir(self.migrate_dir) if self.filemask.match(f.name))
 
-    def compile(self, name, migrate="", rollback="", num=None) -> str:
-        """Create a migration."""
-        if num is None:
-            num = len(self.todo)
+        return sorted(
+            f.stem
+            for f in self.migrate_dir.iterdir()
+            if self.filemask.match(f.name)
+        )
 
-        name = "{:03}_".format(num + 1) + name
+    def compile(
+        self,
+        name: str,
+        migrate: str = "",
+        rollback: str = "",
+        num: int | None = None,
+    ) -> str:
+        """Create a migration.
+
+        Naming scheme is timestamp-based:
+
+            YYYYMMDDHHMMSS_name.py
+
+        If `name` already starts with a 14-digit timestamp and an underscore,
+        it will be used as-is (no double prefix).
+        """
+        if not re.match(r"^\d{14}_", name):
+            ts = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
+            name = f"{ts}_{name}"
+
         filename = name + ".py"
         path = self.migrate_dir / filename
         with path.open("w") as f:
@@ -291,9 +313,9 @@ class Router(BaseRouter):
         path = self.migrate_dir / (name + ".py")
         with path.open("r") as f:
             code = f.read()
-            scope = {}
-            code = compile(code, "<string>", "exec", dont_inherit=True)
-            exec(code, scope, None)
+            scope: dict[str, Any] = {}
+            compiled = compile(code, "<string>", "exec", dont_inherit=True)
+            exec(compiled, scope, None)
             return scope.get("migrate", void), scope.get("rollback", void)
 
     def clear(self):
